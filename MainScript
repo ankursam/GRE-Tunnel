@@ -1,0 +1,149 @@
+#!/bin/sh
+
+# Configuration
+val=`echo $var |  awk -F"=" '{print $2}' /etc/cluster_info`
+A=`echo $val |  awk '{print $1}'`
+B=`echo $val |  awk '{print $2}'`
+C=`echo $val |  awk '{print $3}'`
+#echo ${v1}
+ONBOOT=yes
+DEVICE=gre1
+TYPE=GRE
+MY_INNER_IPADDR=192.168.2.1
+MY_OUTER_IPADDR=$A
+PEER_INNER_IPADDR=192.168.2.2
+PEER_OUTER_IPADDR=$B
+
+echo "ONBOOT=yes" >  /etc/sysconfig/network-scripts/ifcfg-gre1
+echo "DEVICE=gre1" >>  /etc/sysconfig/network-scripts/ifcfg-gre1
+echo "TYPE=GRE" >>  /etc/sysconfig/network-scripts/ifcfg-gre1
+echo "MY_INNER_IPADDR=192.168.2.1" >>  /etc/sysconfig/network-scripts/ifcfg-gre1
+echo "MY_OUTER_IPADDR=$A" >>  /etc/sysconfig/network-scripts/ifcfg-gre1
+echo "PEER_INNER_IPADDR=192.168.2.2" >>  /etc/sysconfig/network-scripts/ifcfg-gre1
+echo "PEER_OUTER_IPADDR=$B" >>  /etc/sysconfig/network-scripts/ifcfg-gre1
+
+echo "ONBOOT=yes" >  /etc/ifcfg-gre1
+echo "DEVICE=gre1" >>  /etc/ifcfg-gre1
+echo "TYPE=GRE" >>  /etc/ifcfg-gre1
+echo "MY_INNER_IPADDR=192.168.2.2" >>  /etc/ifcfg-gre1
+echo "MY_OUTER_IPADDR=$B" >>  /etc/ifcfg-gre1
+echo "PEER_INNER_IPADDR=192.168.2.1" >>  /etc/ifcfg-gre1
+echo "PEER_OUTER_IPADDR=$A" >>  /etc/ifcfg-gre1
+
+sudo /sbin/modprobe tun
+sudo /sbin/modprobe ip_gre
+sudo /sbin/ip tunnel add ${DEVICE} mode gre remote ${PEER_OUTER_IPADDR} local ${MY_OUTER_IPADDR}
+sudo /sbin/ip addr add ${MY_INNER_IPADDR} dev ${DEVICE} peer ${PEER_INNER_IPADDR}
+sudo /sbin/ip link set ${DEVICE} up
+
+
+##GETMAC
+ssh -T -T root@$B "/sbin/ifconfig eth0 | grep -o -E '([[:xdigit:]]{1,2}:){5}[[:xdigit:]]{1,2}'" > mac_b
+ssh -T -T root@$C "/sbin/ifconfig eth0 | grep -o -E '([[:xdigit:]]{1,2}:){5}[[:xdigit:]]{1,2}'" > mac_c
+MACB=`cat mac_b`
+MACC=`cat mac_c`
+
+###ON REMOTE MACHINE
+scp /etc/ifcfg-gre1 $B:/etc/sysconfig/network-scripts/
+ssh -T -T  -o "StrictHostKeyChecking no" root@$B bash -c "'
+/sbin/modprobe tun
+/sbin/modprobe ip_gre
+/sbin/ip tunnel add ${DEVICE} mode gre remote ${MY_OUTER_IPADDR} local ${PEER_OUTER_IPADDR}
+/sbin/ip addr add ${PEER_INNER_IPADDR} dev ${DEVICE} peer ${MY_INNER_IPADDR}
+/sbin/ip link set ${DEVICE} up
+'"
+
+
+##sets up 192.168 network virtual interfaces (aliases) on B and C
+ssh -T -T  -o "StrictHostKeyChecking no" root@$B bash -c "'
+/sbin/ifconfig eth0:22 192.168.3.1
+'"
+ssh -T -T  -o "StrictHostKeyChecking no" root@$C bash -c "'
+/sbin/ifconfig eth0:22 192.168.3.2
+'"
+
+##Enable routing through B to C
+#AT B
+ssh -T -T  -o "StrictHostKeyChecking no" root@$B bash -c "'
+chmod 777 /proc/sys/net/ipv4/ip_forward
+/sbin/sysctl -w net.ipv4.ip_forward=1
+/sbin/arp -s 192.168.3.2 $MACB
+'"
+
+#AT C
+ssh -T -T  -o "StrictHostKeyChecking no" root@$C bash -c "'
+chmod 777 /proc/sys/net/ipv4/ip_forward
+/sbin/sysctl -w net.ipv4.ip_forward=1
+/sbin/ip route add 192.168.2.0/24 via 192.168.3.1 dev eth0
+/sbin/arp -s 192.168.3.1 $MACC
+'"
+
+##SET up SSH server on 192.168 network
+#AT B
+ssh -T -T  -o "StrictHostKeyChecking no" root@$B bash -c "'
+echo "Protocol 2" >  /etc/ssh/tunnel_sshd_config
+echo "SyslogFacility AUTHPRIV" >  /etc/ssh/tunnel_sshd_config
+echo "PubkeyAuthentication yes" >  /etc/ssh/tunnel_sshd_config
+echo "AuthorizedKeysFile      .ssh/authorized_keys" >  /etc/ssh/tunnel_sshd_config
+echo "ChallengeResponseAuthentication no" >>  /etc/ssh/tunnel_sshd_config
+echo "GSSAPIAuthentication yes" >>  /etc/ssh/tunnel_sshd_config
+echo "GSSAPICleanupCredentials yes" >>  /etc/ssh/tunnel_sshd_config
+echo "UsePAM yes" >>  /etc/ssh/tunnel_sshd_config
+echo "AcceptEnv LANG LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MONETARY LC_MESSAGES" >>  /etc/ssh/tunnel_sshd_config
+echo "AcceptEnv LC_PAPER LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT" >>  /etc/ssh/tunnel_sshd_config
+echo "AcceptEnv LC_IDENTIFICATION LC_ALL" >>  /etc/ssh/tunnel_sshd_config
+echo "Subsystem       sftp    /usr/libexec/openssh/sftp-server" >>  /etc/ssh/tunnel_sshd_config
+echo "MaxStartups 1024" >>  /etc/ssh/tunnel_sshd_config
+echo "Banner none" >>  /etc/ssh/tunnel_sshd_config
+echo "ListenAddress 192.168.2.2" >>  /etc/ssh/tunnel_sshd_config
+echo "PasswordAuthentication no" >>  /etc/ssh/tunnel_sshd_config
+echo "PermitRootLogin without-password" >>  /etc/ssh/tunnel_sshd_config
+echo "PidFile /var/run/tunnel_sshd.pid" >>  /etc/ssh/tunnel_sshd_config
+echo "StrictModes no" >>  /etc/ssh/tunnel_sshd_config
+echo "UseDNS no" >>  /etc/ssh/tunnel_sshd_config
+echo "X11Forwarding yes" >>  /etc/ssh/tunnel_sshd_config
+echo "AllowUsers root" >>  /etc/ssh/tunnel_sshd_config
+
+
+cd /usr/sbin
+ln -s sshd tunnel_sshd
+cd /etc/pam.d/
+/sbin/chkconfig --add tunnel_sshd
+/sbin/service tunnel_sshd start
+
+'"
+
+ssh -T -T  -o "StrictHostKeyChecking no" root@$C bash -c "'
+echo "Protocol 2" >  /etc/ssh/tunnel_sshd_config
+echo "SyslogFacility AUTHPRIV" >  /etc/ssh/tunnel_sshd_config
+echo "PubkeyAuthentication yes" >  /etc/ssh/tunnel_sshd_config
+echo "AuthorizedKeysFile      .ssh/authorized_keys" >  /etc/ssh/tunnel_sshd_config
+echo "ChallengeResponseAuthentication no" >>  /etc/ssh/tunnel_sshd_config
+echo "GSSAPIAuthentication yes" >>  /etc/ssh/tunnel_sshd_config
+echo "GSSAPICleanupCredentials yes" >>  /etc/ssh/tunnel_sshd_config
+echo "UsePAM yes" >>  /etc/ssh/tunnel_sshd_config
+echo "AcceptEnv LANG LC_CTYPE LC_NUMERIC LC_TIME LC_COLLATE LC_MONETARY LC_MESSAGES" >>  /etc/ssh/tunnel_sshd_config
+echo "AcceptEnv LC_PAPER LC_NAME LC_ADDRESS LC_TELEPHONE LC_MEASUREMENT" >>  /etc/ssh/tunnel_sshd_config
+echo "AcceptEnv LC_IDENTIFICATION LC_ALL" >>  /etc/ssh/tunnel_sshd_config
+echo "PermitTunnel yes" >>  /etc/ssh/tunnel_sshd_config
+echo "Subsystem       sftp    /usr/libexec/openssh/sftp-server" >>  /etc/ssh/tunnel_sshd_config
+echo "MaxStartups 1024" >>  /etc/ssh/tunnel_sshd_config
+echo "Banner none" >>  /etc/ssh/tunnel_sshd_config
+echo "ListenAddress 192.168.3.2" >>  /etc/ssh/tunnel_sshd_config
+echo "PasswordAuthentication no" >>  /etc/ssh/tunnel_sshd_config
+echo "PermitRootLogin without-password" >>  /etc/ssh/tunnel_sshd_config
+echo "PidFile /var/run/tunnel_sshd.pid" >>  /etc/ssh/tunnel_sshd_config
+echo "StrictModes no" >>  /etc/ssh/tunnel_sshd_config
+echo "UseDNS no" >>  /etc/ssh/tunnel_sshd_config
+echo "X11Forwarding yes" >>  /etc/ssh/tunnel_sshd_config
+echo "AllowUsers root" >>  /etc/ssh/tunnel_sshd_config
+
+
+cd /usr/sbin
+ln -s sshd tunnel_sshd
+cd /etc/pam.d/
+/sbin/chkconfig --add tunnel_sshd
+/sbin/service tunnel_sshd start
+
+'"
+
